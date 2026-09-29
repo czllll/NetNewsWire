@@ -24,23 +24,32 @@ var nnwTranslation = (function() {
 	const css = `
 		.${translationClass} {
 			display: block;
-			margin-top: 0.35em;
-			padding-left: 0.6em;
-			border-left: 2px solid color-mix(in srgb, currentColor 25%, transparent);
-			opacity: 0.8;
+			margin-top: 0.3em;
+			color: color-mix(in srgb, currentColor 62%, transparent);
 			font-weight: normal;
 			font-style: normal;
+			-webkit-user-select: text;
 		}
-		h1 > .${translationClass}, h2 > .${translationClass}, h3 > .${translationClass} {
-			font-size: 0.8em;
+		h1 > .${translationClass}, h2 > .${translationClass}, h3 > .${translationClass},
+		h4 > .${translationClass}, h5 > .${translationClass}, h6 > .${translationClass} {
+			margin-top: 0.2em;
+			font-size: 0.72em;
+			font-weight: 500;
 		}
 		.${pendingClass} {
-			opacity: 0.4;
+			width: min(60%, 18em);
+			height: 0.7em;
+			margin-top: 0.55em;
+			border-radius: 0.35em;
+			background: color-mix(in srgb, currentColor 12%, transparent);
+			animation: nnw-translation-pulse 1.2s ease-in-out infinite;
+		}
+		@keyframes nnw-translation-pulse {
+			50% { opacity: 0.4; }
 		}
 		.${errorClass} {
-			color: #d33;
-			opacity: 1;
-			font-size: 0.85em;
+			font-size: 0.8em;
+			color: color-mix(in srgb, #e5484d 85%, currentColor);
 		}
 	`;
 
@@ -62,6 +71,17 @@ var nnwTranslation = (function() {
 	// Only translate the innermost blocks: an <li> that holds <p>s is handled through its <p>s.
 	function isLeafBlock(element) {
 		return element.querySelector(blockSelector) === null;
+	}
+
+	// A short line that's all link text, such as an attribution ("Jeff Johnson:"), doesn't need translating.
+	function isShortLinkLine(element, text) {
+		if (text.length > 60 || /^H[1-6]$/.test(element.tagName)) {
+			return false;
+		}
+		let linkText = "";
+		element.querySelectorAll("a").forEach(anchor => linkText += textOf(anchor));
+		const remainder = text.replace(/[\s\p{P}]/gu, "").length - linkText.replace(/[\s\p{P}]/gu, "").length;
+		return linkText.length > 0 && remainder <= 0;
 	}
 
 	function textOf(element) {
@@ -100,7 +120,6 @@ var nnwTranslation = (function() {
 		const id = element.getAttribute(idAttribute);
 		const translation = document.createElement("span");
 		translation.className = `${translationClass} ${pendingClass}`;
-		translation.textContent = "…";
 		element.appendChild(translation);
 
 		queue.push({ id: id, text: texts.get(id) });
@@ -135,7 +154,7 @@ var nnwTranslation = (function() {
 				if (text.length < minimumTextLength || text.length > maximumTextLength) {
 					continue;
 				}
-				if (!/\p{L}/u.test(text) || (skipCJK && isCJK(text))) {
+				if (!/\p{L}/u.test(text) || (skipCJK && isCJK(text)) || isShortLinkLine(element, text)) {
 					continue;
 				}
 
