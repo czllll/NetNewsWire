@@ -296,6 +296,10 @@ final class MainWindowController: NSWindowController, NSUserInterfaceValidations
 			return validateToggleArticleExtractor(item)
 		}
 
+		if item.action == #selector(toggleTranslation(_:)) {
+			return validateToggleTranslation(item)
+		}
+
 		if item.action == #selector(toolbarShowShareMenu(_:)) {
 			return canShowShareMenu()
 		}
@@ -458,6 +462,19 @@ final class MainWindowController: NSWindowController, NSUserInterfaceValidations
 
 	@IBAction func toggleStarred(_ sender: Any?) {
 		currentTimelineViewController?.toggleStarredStatusForSelectedArticles()
+	}
+
+	@IBAction func toggleTranslation(_ sender: Any?) {
+		defer {
+			makeToolbarValidate()
+		}
+
+		let settings = TranslationSettings.shared
+		if !settings.isEnabled && settings.apiKey.isEmpty && settings.baseURL == TranslationSettings.defaultBaseURL {
+			showTranslationSetupAlert()
+			return
+		}
+		settings.isEnabled.toggle()
 	}
 
 	@IBAction func toggleArticleExtractor(_ sender: Any?) {
@@ -865,6 +882,7 @@ extension NSToolbarItem.Identifier {
 	static let markRead = NSToolbarItem.Identifier("markRead")
 	static let markStar = NSToolbarItem.Identifier("markStar")
 	static let readerView = NSToolbarItem.Identifier("readerView")
+	static let translate = NSToolbarItem.Identifier("translate")
 	static let openInBrowser = NSToolbarItem.Identifier("openInBrowser")
 	static let share = NSToolbarItem.Identifier("share")
 	static let articleThemeMenu = NSToolbarItem.Identifier("articleThemeMenu")
@@ -938,6 +956,13 @@ extension MainWindowController: NSToolbarDelegate {
 			toolbarItem.menuFormRepresentation = NSMenuItem(title: description, action: #selector(toggleArticleExtractor(_:)), keyEquivalent: "")
 			return toolbarItem
 
+		case .translate:
+			let title = NSLocalizedString("Translate", comment: "Translate button")
+			let image = NSImage(systemSymbolName: "translate", accessibilityDescription: title) ?? NSImage()
+			let toolbarItem = buildToolbarButton(.translate, title, image, "toggleTranslation:")
+			(toolbarItem.view as? NSButton)?.setButtonType(.pushOnPushOff)
+			return toolbarItem
+
 		case .share:
 			let title = NSLocalizedString("Share", comment: "Share button")
 			return buildToolbarButton(.share, title, Assets.Images.share, "toolbarShowShareMenu:")
@@ -988,6 +1013,7 @@ extension MainWindowController: NSToolbarDelegate {
 			.markRead,
 			.markStar,
 			.readerView,
+			.translate,
 			.openInBrowser,
 			.share,
 			.articleThemeMenu,
@@ -1010,6 +1036,7 @@ extension MainWindowController: NSToolbarDelegate {
 			.markStar,
 			.nextUnread,
 			.readerView,
+			.translate,
 			.share,
 			.openInBrowser,
 			.flexibleSpace,
@@ -1508,6 +1535,33 @@ private extension MainWindowController {
 		}
 
 		return state != .processing
+	}
+
+	func validateToggleTranslation(_ item: NSValidatedUserInterfaceItem) -> Bool {
+		let state: NSControl.StateValue = TranslationSettings.shared.isEnabled ? .on : .off
+		if let menuItem = item as? NSMenuItem {
+			menuItem.state = state
+		} else if let toolbarItem = item as? NSToolbarItem, let button = toolbarItem.view as? NSButton {
+			button.state = state
+		}
+		return true
+	}
+
+	func showTranslationSetupAlert() {
+		guard let window else {
+			return
+		}
+		let alert = NSAlert()
+		alert.messageText = NSLocalizedString("Set Up Translation", comment: "Translation setup alert")
+		alert.informativeText = NSLocalizedString("Enter an API key — or the URL of a local server such as Ollama — in Settings > Translation.", comment: "Translation setup alert")
+		alert.addButton(withTitle: NSLocalizedString("Open Settings", comment: "Translation setup alert"))
+		alert.addButton(withTitle: NSLocalizedString("Cancel", comment: "Cancel"))
+		alert.beginSheetModal(for: window) { response in
+			guard response == .alertFirstButtonReturn else {
+				return
+			}
+			(NSApp.delegate as? AppDelegate)?.showTranslationPreferences()
+		}
 	}
 
 	func canMarkAboveArticlesAsRead() -> Bool {

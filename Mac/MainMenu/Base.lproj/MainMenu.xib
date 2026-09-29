@@ -526,6 +526,11 @@
                                     <action selector="toggleArticleExtractor:" target="-1" id="H3B-RR-1tB"/>
                                 </connections>
                             </menuItem>
+                            <menuItem title="Translate Article" keyEquivalent="T" id="nTr-Tl-8aX">
+                                <connections>
+                                    <action selector="toggleTranslation:" target="-1" id="nTr-Ac-9bY"/>
+                                </connections>
+                            </menuItem>
                             <menuItem title="Open in Browser" keyEquivalent="" id="4iQ-1v-dTa">
                                 <connections>
                                     <action selector="openArticleInBrowser:" target="-1" id="KeH-ES-fpo"/>

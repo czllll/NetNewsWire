@@ -159,7 +159,16 @@ private extension WebViewConfiguration {
 #if os(iOS)
 		scripts.insert(feedInfoLabelScript, at: 0)
 #endif
+		scripts.append(translationScript)
 		return scripts
+	}()
+
+	// Runs in the client content world, so it works even when article JavaScript is off,
+	// and article scripts can't reach it.
+	static let translationScript: WKUserScript = {
+		let scriptURL = Bundle.main.url(forResource: "translation", withExtension: "js")!
+		let scriptSource = try! String(contentsOf: scriptURL, encoding: .utf8)
+		return WKUserScript(source: scriptSource, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .defaultClient)
 	}()
 
 #if os(iOS)

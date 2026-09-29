@@ -67,6 +67,7 @@ final class DetailWebViewController: NSViewController {
 	}
 
 	private let detailIconSchemeHandler = DetailIconSchemeHandler()
+	private let articleTranslator = ArticleTranslator()
 	private var waitingForFirstReload = false
 	private var isReloadingHTML = false
 	private let keyboardDelegate = DetailKeyboardDelegate()
@@ -125,6 +126,7 @@ final class DetailWebViewController: NSViewController {
 			}
 		}
 		NotificationCenter.default.addObserver(self, selector: #selector(currentArticleThemeDidChangeNotification(_:)), name: .CurrentArticleThemeDidChangeNotification, object: nil)
+		NotificationCenter.default.addObserver(self, selector: #selector(translationSettingsDidChange(_:)), name: .translationSettingsDidChange, object: nil)
 
 		webView.loadFileURL(ArticleRenderer.blank.url, allowingReadAccessTo: ArticleRenderer.blank.baseURL)
 	}
@@ -156,6 +158,11 @@ final class DetailWebViewController: NSViewController {
 
 	@objc func currentArticleThemeDidChangeNotification(_ note: Notification) {
 		reloadHTMLMaintainingScrollPosition()
+	}
+
+	@objc func translationSettingsDidChange(_ note: Notification) {
+		articleTranslator.clear(webView)
+		translateIfNeeded()
 	}
 
 	// MARK: Media Functions
@@ -272,6 +279,8 @@ extension DetailWebViewController: WKNavigationDelegate, WKUIDelegate {
 			webView.evaluateJavaScript("window.scrollTo(0, \(pendingScrollRestorationY));")
 			self.pendingScrollRestorationY = nil
 		}
+
+		translateIfNeeded()
 	}
 
 	func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
@@ -304,6 +313,13 @@ extension DetailWebViewController: WKNavigationDelegate, WKUIDelegate {
 // MARK: - Private
 
 private extension DetailWebViewController {
+
+	func translateIfNeeded() {
+		guard TranslationSettings.shared.isEnabled, article != nil else {
+			return
+		}
+		articleTranslator.translate(webView)
+	}
 
 	func reloadArticleImage() {
 		guard let article = article else { return }
@@ -365,6 +381,7 @@ private extension DetailWebViewController {
 		}
 
 		delegate?.mouseDidExit(self)
+		articleTranslator.cancel()
 
 		let theme = ArticleThemesManager.shared.currentTheme
 		let rendering: ArticleRenderer.Rendering

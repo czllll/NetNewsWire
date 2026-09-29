@@ -565,6 +565,11 @@ let appName = "NetNewsWire"
 		preferencesWindowController.showWindow(self)
 	}
 
+	func showTranslationPreferences() {
+		preferencesWindowController.showWindow(self)
+		preferencesWindowController.showTranslationPreferences()
+	}
+
 	@IBAction func newMainWindow(_ sender: Any?) {
 		createAndShowMainWindow()
 	}

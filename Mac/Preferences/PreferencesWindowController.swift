@@ -24,6 +24,7 @@ private struct PreferencesToolbarItemSpec {
 private struct ToolbarItemIdentifier {
 	static let General = "General"
 	static let Accounts = "Accounts"
+	static let Translation = "Translation"
 	static let Advanced = "Advanced"
 }
 
@@ -39,6 +40,9 @@ final class PreferencesWindowController: NSWindowController, NSToolbarDelegate {
 		specs += [PreferencesToolbarItemSpec(identifierRawValue: ToolbarItemIdentifier.Accounts,
 											 name: NSLocalizedString("Accounts", comment: "Preferences"),
 											 image: Assets.Images.preferencesToolbarAccounts)]
+		specs += [PreferencesToolbarItemSpec(identifierRawValue: ToolbarItemIdentifier.Translation,
+											 name: NSLocalizedString("Translation", comment: "Preferences"),
+											 image: NSImage(systemSymbolName: "translate", accessibilityDescription: nil))]
 		specs += [PreferencesToolbarItemSpec(identifierRawValue: ToolbarItemIdentifier.Advanced,
 											 name: NSLocalizedString("Advanced", comment: "Preferences"),
 											 image: Assets.Images.preferencesToolbarAdvanced)]
@@ -66,6 +70,11 @@ final class PreferencesWindowController: NSWindowController, NSToolbarDelegate {
 	}
 
 	// MARK: Actions
+
+	func showTranslationPreferences() {
+		window?.toolbar?.selectedItemIdentifier = NSToolbarItem.Identifier(ToolbarItemIdentifier.Translation)
+		switchToView(identifier: ToolbarItemIdentifier.Translation)
+	}
 
 	@objc func toolbarItemClicked(_ sender: Any?) {
 		guard let toolbarItem = sender as? NSToolbarItem else {
@@ -162,6 +171,8 @@ private extension PreferencesWindowController {
 			viewController = GeneralPreferencesViewController()
 		case ToolbarItemIdentifier.Accounts:
 			viewController = AccountsPreferencesViewController()
+		case ToolbarItemIdentifier.Translation:
+			viewController = TranslationPreferencesViewController()
 		case ToolbarItemIdentifier.Advanced:
 			viewController = AdvancedPreferencesViewController()
 		default:

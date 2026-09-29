@@ -1,0 +1,140 @@
+// Immersive translation: a translation appears under each paragraph of the article.
+// Runs in its own content world, so it works when article JavaScript is disabled
+// and article scripts can't call into it.
+
+var nnwTranslation = (function() {
+
+	const blockSelector = "p, li, h1, h2, h3, h4, h5, h6, blockquote, dt, dd, figcaption, th, td";
+	const skipAncestorSelector = "pre, code, script, style, svg, math, .nnw-translation";
+	const translationClass = "nnw-translation";
+	const pendingClass = "nnw-translation-pending";
+	const errorClass = "nnw-translation-error";
+	const idAttribute = "data-nnw-tid";
+	const styleID = "nnw-translation-style";
+	const minimumTextLength = 2;
+	const maximumTextLength = 5000;
+
+	const css = `
+		.${translationClass} {
+			display: block;
+			margin-top: 0.35em;
+			padding-left: 0.6em;
+			border-left: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+			opacity: 0.8;
+			font-weight: normal;
+			font-style: normal;
+		}
+		h1 > .${translationClass}, h2 > .${translationClass}, h3 > .${translationClass} {
+			font-size: 0.8em;
+		}
+		.${pendingClass} {
+			opacity: 0.4;
+		}
+		.${errorClass} {
+			color: #d33;
+			opacity: 1;
+			font-size: 0.85em;
+		}
+	`;
+
+	function roots() {
+		return document.querySelectorAll(".articleTitle, #bodyContainer");
+	}
+
+	function isCJK(text) {
+		const cjk = text.match(/[぀-ヿ㐀-鿿가-힯]/g);
+		return cjk !== null && cjk.length / text.replace(/\s/g, "").length > 0.3;
+	}
+
+	// Only translate the innermost blocks: an <li> that holds <p>s is handled through its <p>s.
+	function isLeafBlock(element) {
+		return element.querySelector(blockSelector) === null;
+	}
+
+	function textOf(element) {
+		return (element.innerText || element.textContent || "").trim();
+	}
+
+	function installStyle() {
+		if (document.getElementById(styleID)) {
+			return;
+		}
+		const style = document.createElement("style");
+		style.id = styleID;
+		style.textContent = css;
+		document.head.appendChild(style);
+	}
+
+	// Marks the paragraphs to translate, shows placeholders, and returns [{id, text}].
+	function collect(options) {
+		installStyle();
+		const skipCJK = options && options.skipCJK;
+		const items = [];
+		let nextID = document.querySelectorAll(`[${idAttribute}]`).length;
+
+		for (const root of roots()) {
+			for (const element of root.querySelectorAll(blockSelector)) {
+				if (element.hasAttribute(idAttribute) || !isLeafBlock(element) || element.closest(skipAncestorSelector)) {
+					continue;
+				}
+				const text = textOf(element);
+				if (text.length < minimumTextLength || text.length > maximumTextLength) {
+					continue;
+				}
+				if (!/\p{L}/u.test(text) || (skipCJK && isCJK(text))) {
+					continue;
+				}
+
+				const id = String(nextID++);
+				element.setAttribute(idAttribute, id);
+
+				const translation = document.createElement("span");
+				translation.className = `${translationClass} ${pendingClass}`;
+				translation.textContent = "…";
+				element.appendChild(translation);
+
+				items.push({ id: id, text: text });
+			}
+		}
+		return items;
+	}
+
+	function translationElement(id) {
+		const element = document.querySelector(`[${idAttribute}="${id}"]`);
+		if (!element) {
+			return null;
+		}
+		return element.querySelector(`:scope > .${translationClass}`);
+	}
+
+	// results: [{id, text}]
+	function apply(results) {
+		for (const result of results) {
+			const translation = translationElement(result.id);
+			if (!translation) {
+				continue;
+			}
+			translation.classList.remove(pendingClass, errorClass);
+			translation.textContent = result.text;
+		}
+	}
+
+	function fail(ids, message) {
+		for (const id of ids) {
+			const translation = translationElement(id);
+			if (!translation) {
+				continue;
+			}
+			translation.classList.remove(pendingClass);
+			translation.classList.add(errorClass);
+			translation.textContent = message;
+		}
+	}
+
+	function clear() {
+		document.querySelectorAll(`.${translationClass}`).forEach(element => element.remove());
+		document.querySelectorAll(`[${idAttribute}]`).forEach(element => element.removeAttribute(idAttribute));
+	}
+
+	return { collect: collect, apply: apply, fail: fail, clear: clear };
+})();
