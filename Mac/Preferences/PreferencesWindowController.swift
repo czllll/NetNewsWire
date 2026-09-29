@@ -41,8 +41,8 @@ final class PreferencesWindowController: NSWindowController, NSToolbarDelegate {
 											 name: NSLocalizedString("Accounts", comment: "Preferences"),
 											 image: Assets.Images.preferencesToolbarAccounts)]
 		specs += [PreferencesToolbarItemSpec(identifierRawValue: ToolbarItemIdentifier.Translation,
-											 name: NSLocalizedString("Translation", comment: "Preferences"),
-											 image: NSImage(systemSymbolName: "translate", accessibilityDescription: nil))]
+											 name: NSLocalizedString("Reading", comment: "Preferences"),
+											 image: NSImage(systemSymbolName: "book", accessibilityDescription: nil))]
 		specs += [PreferencesToolbarItemSpec(identifierRawValue: ToolbarItemIdentifier.Advanced,
 											 name: NSLocalizedString("Advanced", comment: "Preferences"),
 											 image: Assets.Images.preferencesToolbarAdvanced)]

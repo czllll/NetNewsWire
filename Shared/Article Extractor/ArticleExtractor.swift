@@ -7,8 +7,6 @@
 //
 
 import Foundation
-import Account
-import Secrets
 
 public enum ArticleExtractorState: Sendable {
     case ready
@@ -23,94 +21,56 @@ public enum ArticleExtractorState: Sendable {
 	func articleExtractionDidComplete(extractedArticle: ExtractedArticle)
 }
 
+/// Fetches the full article for Reader View. This fork extracts it on the Mac with Readability.js
+/// (see ReadabilityExtractor) instead of Feedbin's extraction service, which needs private API keys.
 @MainActor final class ArticleExtractor {
 	let articleLink: String
 	let delegate: ArticleExtractorDelegate
 	var article: ExtractedArticle?
 
 	var state = ArticleExtractorState.ready
-    private let url: URL
-	private var dataTask: URLSessionDataTask?
+	private let url: URL
+	private var task: Task<Void, Never>?
 
 	public init?(_ articleLink: String, delegate: ArticleExtractorDelegate) {
 		self.articleLink = articleLink
 		self.delegate = delegate
 
-		let clientURL = "https://extract.feedbin.com/parser"
-		let username = SecretKey.mercuryClientID
 		let articleLinkToUse = ArticleExtractor.specialCaseExtractionLink(for: articleLink) ?? articleLink
-		let signature = articleLinkToUse.hmacUsingSHA1(key: SecretKey.mercuryClientSecret)
-
-		if let base64URL = articleLinkToUse.data(using: .utf8)?.base64EncodedString() {
-			let fullURL = "\(clientURL)/\(username)/\(signature)?base64_url=\(base64URL)"
-			if let url = URL(string: fullURL) {
-				self.url = url
-				return
-			}
+		guard let url = URL(string: articleLinkToUse), url.scheme == "https" || url.scheme == "http" else {
+			return nil
 		}
-
-		return nil
-    }
+		self.url = url
+	}
 
 	public func process() {
+		state = .processing
 
-        state = .processing
-
-		dataTask = URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
-			Task { @MainActor in
-				guard let self else {
+		task = Task { [weak self] in
+			guard let self else {
+				return
+			}
+			do {
+				let extractedArticle = try await ReadabilityExtractor.shared.extract(from: url)
+				guard state != .cancelled else {
 					return
 				}
-				guard self.state != .cancelled else {
+				article = extractedArticle
+				state = .complete
+				delegate.articleExtractionDidComplete(extractedArticle: extractedArticle)
+			} catch {
+				guard state != .cancelled else {
 					return
 				}
-
-				if let error = error {
-					self.state = .failedToParse
-					DispatchQueue.main.async {
-						self.delegate.articleExtractionDidFail(with: error)
-					}
-					return
-				}
-
-				guard let data = data else {
-					self.state = .failedToParse
-					DispatchQueue.main.async {
-						self.delegate.articleExtractionDidFail(with: URLError(.cannotDecodeContentData))
-					}
-					return
-				}
-
-				do {
-					let decoder = JSONDecoder()
-					decoder.dateDecodingStrategy = .iso8601
-					let decodedArticle = try decoder.decode(ExtractedArticle.self, from: data)
-
-					Task { @MainActor in
-						self.article = decodedArticle
-						if decodedArticle.content == nil {
-							self.state = .failedToParse
-							self.delegate.articleExtractionDidFail(with: URLError(.cannotDecodeContentData))
-						} else {
-							self.state = .complete
-							self.delegate.articleExtractionDidComplete(extractedArticle: decodedArticle)
-						}
-					}
-				} catch {
-					self.state = .failedToParse
-					Task { @MainActor in
-						self.delegate.articleExtractionDidFail(with: error)
-					}
-				}
+				state = .failedToParse
+				delegate.articleExtractionDidFail(with: error)
 			}
 		}
-
-        dataTask!.resume()
-    }
+	}
 
 	public func cancel() {
 		state = .cancelled
-		dataTask?.cancel()
+		task?.cancel()
 	}
 }
 

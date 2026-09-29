@@ -23,6 +23,8 @@ final class MainWindowController: NSWindowController, NSUserInterfaceValidations
     private var activityManager = ActivityManager()
 
 	private var isShowingExtractedArticle = false
+	/// The article's own text is showing while its full text loads in the background.
+	private var isLoadingFullTextAutomatically = false
 	private var articleExtractor: ArticleExtractor?
 	private var sharingServicePickerDelegate: SharingServicePickerDelegate?
 
@@ -478,6 +480,7 @@ final class MainWindowController: NSWindowController, NSUserInterfaceValidations
 	}
 
 	@IBAction func toggleArticleExtractor(_ sender: Any?) {
+		isLoadingFullTextAutomatically = false
 
 		guard let currentLink = currentLink, let article = oneSelectedArticle else {
 			return
@@ -723,6 +726,7 @@ extension MainWindowController: TimelineContainerViewControllerDelegate {
 		articleExtractor?.cancel()
 		articleExtractor = nil
 		isShowingExtractedArticle = false
+		isLoadingFullTextAutomatically = false
 		makeToolbarValidate()
 
 		let detailState: DetailState
@@ -731,6 +735,12 @@ extension MainWindowController: TimelineContainerViewControllerDelegate {
 				activityManager.reading(feed: nil, article: articles.first)
 				if articles.first?.feed?.readerViewAlwaysEnabled == true {
 					detailState = .loading
+					startArticleExtractorForCurrentLink()
+				} else if let article = articles.first, FullTextSettings.automaticallyLoadsFullText, ArticleSummaryDetector.isLikelySummary(article, homePageURL: article.feed?.homePageURL) {
+					// Show the summary right away; the full text replaces it when it arrives.
+					detailState = .article(article, restoreArticleWindowScrollY)
+					restoreArticleWindowScrollY = nil
+					isLoadingFullTextAutomatically = true
 					startArticleExtractorForCurrentLink()
 				} else {
 					detailState = .article(articles.first!, restoreArticleWindowScrollY)
@@ -828,10 +838,29 @@ extension MainWindowController: NSSearchFieldDelegate {
 extension MainWindowController: ArticleExtractorDelegate {
 
 	func articleExtractionDidFail(with: Error) {
+		if isLoadingFullTextAutomatically {
+			// The summary is already showing — nothing to report.
+			isLoadingFullTextAutomatically = false
+			articleExtractor = nil
+		} else if let article = oneSelectedArticle, article.feed?.readerViewAlwaysEnabled == true, !isShowingExtractedArticle {
+			// Don't leave the Loading page up: fall back to the feed's own text.
+			detailViewController?.setState(.article(article, restoreArticleWindowScrollY), mode: timelineSourceMode)
+			restoreArticleWindowScrollY = nil
+		}
 		makeToolbarValidate()
 	}
 
 	func articleExtractionDidComplete(extractedArticle: ExtractedArticle) {
+		if isLoadingFullTextAutomatically {
+			isLoadingFullTextAutomatically = false
+			// Keep the feed's text if the page didn't yield anything longer — the guess that it was a summary was wrong.
+			if let article = oneSelectedArticle, !Self.extractedText(extractedArticle, isLongerThan: article) {
+				articleExtractor = nil
+				makeToolbarValidate()
+				return
+			}
+		}
+
 		if let article = oneSelectedArticle, articleExtractor?.state != .cancelled {
 			isShowingExtractedArticle = true
 			let detailState = DetailState.extracted(article, extractedArticle, restoreArticleWindowScrollY)
@@ -1505,10 +1534,6 @@ private extension MainWindowController {
 	}
 
 	func validateToggleArticleExtractor(_ item: NSValidatedUserInterfaceItem) -> Bool {
-		guard !AppDefaults.shared.isDeveloperBuild else {
-			return false
-		}
-
 		guard let toolbarItem = item as? NSToolbarItem, let toolbarButton = toolbarItem.view as? ArticleExtractorButton else {
 			if let menuItem = item as? NSMenuItem {
 				menuItem.state = isShowingExtractedArticle ? .on : .off
@@ -1742,6 +1767,14 @@ private extension MainWindowController {
 				setSubtitle(unreadCountProvider.unreadCount)
 			}
 		}
+	}
+
+	static func extractedText(_ extractedArticle: ExtractedArticle, isLongerThan article: Article) -> Bool {
+		func textLength(_ html: String?) -> Int {
+			(html ?? "").replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression).filter { !$0.isWhitespace }.count
+		}
+		let feedTextLength = textLength(article.contentHTML ?? article.contentText ?? article.summary)
+		return textLength(extractedArticle.content) > feedTextLength + 200
 	}
 
 	func startArticleExtractorForCurrentLink() {

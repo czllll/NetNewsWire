@@ -283,7 +283,7 @@ final class ArticleViewController: UIViewController {
 		starBarButtonItem.isEnabled = true
 
 		let permalinkPresent = article.preferredLink != nil
-		articleExtractorButton.isEnabled = permalinkPresent && !AppDefaults.shared.isDeveloperBuild
+		articleExtractorButton.isEnabled = permalinkPresent
 		actionBarButtonItem.isEnabled = permalinkPresent
 
 		if article.status.read {

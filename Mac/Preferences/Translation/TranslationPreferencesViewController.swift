@@ -43,7 +43,7 @@ private struct TranslationProvider: Identifiable, Hashable {
 
 private struct TranslationPreferencesView: View {
 
-	static let height: CGFloat = 392
+	static let height: CGFloat = 500
 
 	private static let customProviderID = "custom"
 
@@ -52,6 +52,7 @@ private struct TranslationPreferencesView: View {
 	@State private var apiKey = TranslationSettings.shared.apiKey
 	@State private var model = TranslationSettings.shared.model
 	@State private var targetLanguage = TranslationSettings.shared.targetLanguage
+	@State private var automaticallyLoadsFullText = FullTextSettings.automaticallyLoadsFullText
 
 	@State private var testState = TestState.idle
 
@@ -87,6 +88,18 @@ private struct TranslationPreferencesView: View {
 		VStack(spacing: 0) {
 			Form {
 				Section {
+					Toggle(isOn: $automaticallyLoadsFullText) {
+						Text(NSLocalizedString("Load Full Text for Summaries", comment: "Reading preferences"))
+						Text(NSLocalizedString("When a feed gives only a summary, open the article in Reader View. To always use Reader View for a feed, turn it on in the feed's Get Info.", comment: "Reading preferences"))
+					}
+					.onChange(of: automaticallyLoadsFullText) { _, newValue in
+						FullTextSettings.automaticallyLoadsFullText = newValue
+					}
+				} header: {
+					Text(NSLocalizedString("Full Text", comment: "Reading preferences"))
+				}
+
+				Section {
 					Toggle(isOn: $isEnabled) {
 						Text(NSLocalizedString("Translate Articles", comment: "Translation preferences"))
 						Text(NSLocalizedString("Shows a translation under each paragraph. Toggle with ⇧⌘T.", comment: "Translation preferences"))
@@ -100,6 +113,8 @@ private struct TranslationPreferencesView: View {
 							Text(language).tag(language)
 						}
 					}
+				} header: {
+					Text(NSLocalizedString("Translation", comment: "Reading preferences"))
 				}
 
 				Section {
@@ -119,7 +134,7 @@ private struct TranslationPreferencesView: View {
 
 					TextField(NSLocalizedString("Model", comment: "Translation preferences"), text: $model, prompt: Text(TranslationProvider.matching(baseURL)?.suggestedModel ?? TranslationSettings.defaultModel))
 				} header: {
-					Text(NSLocalizedString("Model Service", comment: "Translation preferences"))
+					Text(NSLocalizedString("Translation Service", comment: "Translation preferences"))
 				} footer: {
 					Text(NSLocalizedString("Any OpenAI-compatible chat completions API works. The key is stored in your keychain.", comment: "Translation preferences"))
 						.font(.caption)
