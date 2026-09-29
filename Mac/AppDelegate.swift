@@ -98,6 +98,7 @@ let appName = "NetNewsWire"
 	private var accountStatsWindowController: AccountStatsWindowController?
 	private let appMovementMonitor: RSAppMovementMonitor
 	private var softwareUpdater: SPUUpdater?
+	private static let isSoftwareUpdaterEnabled = false
 	private var crashReporter: PLCrashReporter?
 
 	private var themeImportPath: String?
@@ -181,14 +182,19 @@ let appName = "NetNewsWire"
 		}
 
 		// Initialize Sparkle...
-		let hostBundle = Bundle.main
-		let updateDriver = SPUStandardUserDriver(hostBundle: hostBundle, delegate: self)
-		softwareUpdater = SPUUpdater(hostBundle: hostBundle, applicationBundle: hostBundle, userDriver: updateDriver, delegate: self)
+		// This fork adds features the official builds lack, so installing an official update would remove them.
+		if Self.isSoftwareUpdaterEnabled {
+			let hostBundle = Bundle.main
+			let updateDriver = SPUStandardUserDriver(hostBundle: hostBundle, delegate: self)
+			softwareUpdater = SPUUpdater(hostBundle: hostBundle, applicationBundle: hostBundle, userDriver: updateDriver, delegate: self)
 
-		do {
-			try softwareUpdater?.start()
-		} catch {
-			Self.logger.error("Failed to start software updater with error: \(error.localizedDescription)")
+			do {
+				try softwareUpdater?.start()
+			} catch {
+				Self.logger.error("Failed to start software updater with error: \(error.localizedDescription)")
+			}
+		} else {
+			checkForUpdatesMenuItem?.isHidden = true
 		}
 
 		AppDefaults.shared.registerDefaults()

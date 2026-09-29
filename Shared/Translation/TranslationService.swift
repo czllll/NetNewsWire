@@ -46,9 +46,8 @@ actor TranslationService {
 
 	private static let logger = Logger(subsystem: Logger.nnwSubsystem, category: "TranslationService")
 
-	private static let maxItemsPerBatch = 20
 	private static let maxCharactersPerBatch = 6000
-	private static let maxConcurrentRequests = 3
+	private static let maxConcurrentRequests = 4
 
 	private let session: URLSession
 	private let cacheFolder: URL?
@@ -69,10 +68,11 @@ actor TranslationService {
 	}
 
 	/// Yields results as they arrive: cached paragraphs first, then one result per batch.
-	nonisolated func translate(_ items: [TranslationItem], configuration: TranslationConfiguration) -> AsyncStream<TranslationBatchResult> {
+	/// Smaller batches come back sooner; larger ones use fewer requests.
+	nonisolated func translate(_ items: [TranslationItem], configuration: TranslationConfiguration, maxItemsPerBatch: Int = 20) -> AsyncStream<TranslationBatchResult> {
 		AsyncStream { continuation in
 			let task = Task {
-				await self.run(items, configuration: configuration, continuation: continuation)
+				await self.run(items, configuration: configuration, maxItemsPerBatch: maxItemsPerBatch, continuation: continuation)
 				continuation.finish()
 			}
 			continuation.onTermination = { _ in
@@ -90,7 +90,7 @@ actor TranslationService {
 
 private extension TranslationService {
 
-	func run(_ items: [TranslationItem], configuration: TranslationConfiguration, continuation: AsyncStream<TranslationBatchResult>.Continuation) async {
+	func run(_ items: [TranslationItem], configuration: TranslationConfiguration, maxItemsPerBatch: Int, continuation: AsyncStream<TranslationBatchResult>.Continuation) async {
 		var cached = [(id: String, text: String)]()
 		var uncached = [TranslationItem]()
 
@@ -106,7 +106,7 @@ private extension TranslationService {
 			continuation.yield(.translated(cached))
 		}
 
-		let batches = Self.makeBatches(uncached)
+		let batches = Self.makeBatches(uncached, maxItemsPerBatch: maxItemsPerBatch)
 		guard !batches.isEmpty else {
 			return
 		}
@@ -247,7 +247,7 @@ private extension TranslationService {
 
 	// MARK: Helpers
 
-	static func makeBatches(_ items: [TranslationItem]) -> [[TranslationItem]] {
+	static func makeBatches(_ items: [TranslationItem], maxItemsPerBatch: Int) -> [[TranslationItem]] {
 		var batches = [[TranslationItem]]()
 		var current = [TranslationItem]()
 		var characterCount = 0

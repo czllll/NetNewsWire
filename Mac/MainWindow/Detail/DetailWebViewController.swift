@@ -216,6 +216,8 @@ extension DetailWebViewController: WKScriptMessageHandler {
 			delegate?.mouseDidEnter(self, link: link)
 		} else if message.name == MessageName.mouseDidExit {
 			delegate?.mouseDidExit(self)
+		} else if message.name == ArticleTranslator.messageName, let messageWebView = message.webView, messageWebView === webView {
+			articleTranslator.handleMessage(message.body, webView: messageWebView)
 		}
 	}
 }
@@ -318,7 +320,7 @@ private extension DetailWebViewController {
 		guard TranslationSettings.shared.isEnabled, article != nil else {
 			return
 		}
-		articleTranslator.translate(webView)
+		articleTranslator.start(webView)
 	}
 
 	func reloadArticleImage() {
@@ -339,6 +341,7 @@ private extension DetailWebViewController {
 		configuration.userContentController.add(self, name: MessageName.windowDidScroll)
 		configuration.userContentController.add(self, name: MessageName.mouseDidEnter)
 		configuration.userContentController.add(self, name: MessageName.mouseDidExit)
+		configuration.userContentController.add(self, contentWorld: .defaultClient, name: ArticleTranslator.messageName)
 
 		let webView = DetailWebView(frame: view.bounds, configuration: configuration)
 		webView.uiDelegate = self
