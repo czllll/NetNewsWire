@@ -11,17 +11,16 @@ import os
 import RSCore
 
 /// Drives translation.js in an article web view. The page reports paragraphs as they
-/// scroll into view; each is translated in its own request, a few at a time,
-/// and results are shown strictly top to bottom — a later batch that finishes first
-/// waits for the ones above it.
+/// scroll into view; each is translated in its own streaming request, a few at a time.
+/// Translations appear strictly top to bottom: the topmost unfinished paragraph fills in
+/// as the model writes, and paragraphs below it wait their turn, then appear at once.
 @MainActor final class ArticleTranslator {
 
 	/// Message handler name translation.js posts to. Register it in the `.defaultClient` content world.
 	static let messageName = "nnwTranslate"
 
 	private static let logger = Logger(subsystem: Logger.nnwSubsystem, category: "ArticleTranslator")
-	private static let maxItemsPerBatch = 1
-	private static let maxConcurrentBatches = 5
+	private static let maxConcurrentRequests = 5
 
 	/// Bumped on every start and cancel, so results for a previous page are dropped.
 	private var generation = 0
@@ -31,9 +30,16 @@ import RSCore
 	/// Paragraphs waiting for a request, in document order.
 	private var pendingItems = [TranslationItem]()
 	private var tasks = [Int: Task<Void, Never>]()
+	/// Requested paragraphs by sequence number, until they're shown.
+	private var requests = [Int: Request]()
 	private var nextSequence = 0
 	private var nextSequenceToShow = 0
-	private var finishedBatches = [Int: [TranslationBatchResult]]()
+
+	private struct Request {
+		let id: String
+		var partialText: String?
+		var finalEvent: TranslationEvent?
+	}
 
 	func start(_ webView: WKWebView) {
 		cancel()
@@ -60,7 +66,7 @@ import RSCore
 		}
 		tasks.removeAll()
 		pendingItems.removeAll()
-		finishedBatches.removeAll()
+		requests.removeAll()
 		nextSequence = 0
 		nextSequenceToShow = 0
 		webView = nil
@@ -87,69 +93,80 @@ import RSCore
 		pendingItems.append(contentsOf: items)
 		// Paragraph ids count up in document order. After scrolling back up, earlier paragraphs go first.
 		pendingItems.sort { (Int($0.id) ?? 0) < (Int($1.id) ?? 0) }
-		startBatchesIfPossible()
+		startRequestsIfPossible()
 	}
 }
 
 private extension ArticleTranslator {
 
-	func startBatchesIfPossible() {
+	func startRequestsIfPossible() {
 		guard let configuration else {
 			return
 		}
 
-		while tasks.count < Self.maxConcurrentBatches && !pendingItems.isEmpty {
-			let batch = Array(pendingItems.prefix(Self.maxItemsPerBatch))
-			pendingItems.removeFirst(batch.count)
-
+		while tasks.count < Self.maxConcurrentRequests && !pendingItems.isEmpty {
+			let item = pendingItems.removeFirst()
 			let sequence = nextSequence
 			nextSequence += 1
-			let batchGeneration = generation
+			let requestGeneration = generation
+			requests[sequence] = Request(id: item.id)
 
 			tasks[sequence] = Task { [weak self] in
-				var results = [TranslationBatchResult]()
-				for await result in TranslationService.shared.translate(batch, configuration: configuration, maxItemsPerBatch: batch.count) {
-					results.append(result)
+				for await event in TranslationService.shared.translate(item.text, configuration: configuration) {
+					guard !Task.isCancelled else {
+						return
+					}
+					self?.request(sequence, generation: requestGeneration, didProduce: event)
 				}
-				guard !Task.isCancelled else {
-					return
-				}
-				self?.batchDidFinish(sequence: sequence, generation: batchGeneration, results: results)
 			}
 		}
 	}
 
-	func batchDidFinish(sequence: Int, generation batchGeneration: Int, results: [TranslationBatchResult]) {
-		guard batchGeneration == generation else {
+	func request(_ sequence: Int, generation requestGeneration: Int, didProduce event: TranslationEvent) {
+		guard requestGeneration == generation, requests[sequence] != nil else {
 			return
 		}
+
+		if case .partial(let text) = event {
+			requests[sequence]?.partialText = text
+			if sequence == nextSequenceToShow, let id = requests[sequence]?.id {
+				showTranslation(text, id: id)
+			}
+			return
+		}
+
 		tasks[sequence] = nil
-		finishedBatches[sequence] = results
-		showFinishedBatchesInOrder()
-		startBatchesIfPossible()
+		requests[sequence]?.finalEvent = event
+		showFinishedRequestsInOrder()
+		startRequestsIfPossible()
 	}
 
-	func showFinishedBatchesInOrder() {
-		while let results = finishedBatches.removeValue(forKey: nextSequenceToShow) {
+	func showFinishedRequestsInOrder() {
+		while let request = requests[nextSequenceToShow], let finalEvent = request.finalEvent {
+			requests[nextSequenceToShow] = nil
 			nextSequenceToShow += 1
-			for result in results {
-				show(result)
+
+			switch finalEvent {
+			case .translated(let text), .partial(let text):
+				showTranslation(text, id: request.id)
+			case .failed(let message):
+				showFailure(message, id: request.id)
 			}
 		}
+
+		// The new topmost paragraph may already be partway through its reply.
+		if let request = requests[nextSequenceToShow], let partialText = request.partialText {
+			showTranslation(partialText, id: request.id)
+		}
 	}
 
-	func show(_ result: TranslationBatchResult) {
-		guard let webView else {
-			return
-		}
+	func showTranslation(_ text: String, id: String) {
+		let results = [["id": id, "text": text]]
+		webView?.callAsyncJavaScript("nnwTranslation.apply(generation, results);", arguments: ["generation": generation, "results": results], in: nil, in: .defaultClient) { _ in }
+	}
 
-		switch result {
-		case .translated(let translations):
-			let results = translations.map { ["id": $0.id, "text": $0.text] }
-			webView.callAsyncJavaScript("nnwTranslation.apply(generation, results);", arguments: ["generation": generation, "results": results], in: nil, in: .defaultClient) { _ in }
-		case .failed(let ids, let message):
-			let failureText = String(format: NSLocalizedString("Translation failed: %@", comment: "Translation"), message)
-			webView.callAsyncJavaScript("nnwTranslation.fail(generation, ids, message);", arguments: ["generation": generation, "ids": ids, "message": failureText], in: nil, in: .defaultClient) { _ in }
-		}
+	func showFailure(_ message: String, id: String) {
+		let failureText = String(format: NSLocalizedString("Translation failed: %@", comment: "Translation"), message)
+		webView?.callAsyncJavaScript("nnwTranslation.fail(generation, ids, message);", arguments: ["generation": generation, "ids": [id], "message": failureText], in: nil, in: .defaultClient) { _ in }
 	}
 }

@@ -15,10 +15,11 @@ struct TranslationItem: Sendable {
 	let text: String
 }
 
-enum TranslationBatchResult: Sendable {
-	/// (paragraph id, translated text) pairs.
-	case translated([(id: String, text: String)])
-	case failed(ids: [String], message: String)
+enum TranslationEvent: Sendable {
+	/// The translation so far, while the model is still writing it.
+	case partial(String)
+	case translated(String)
+	case failed(String)
 }
 
 enum TranslationError: LocalizedError {
@@ -38,20 +39,21 @@ enum TranslationError: LocalizedError {
 	}
 }
 
-/// Translates article paragraphs with an OpenAI-compatible chat completions API.
-/// Paragraphs are sent in batches, and results are cached on disk by model, language, and text.
+/// Translates article paragraphs, one per request, with an OpenAI-compatible chat completions API.
+/// Replies are streamed so text shows up as the model writes it, and finished translations
+/// are cached on disk by model, language, and text.
 actor TranslationService {
 
 	static let shared = TranslationService()
 
 	private static let logger = Logger(subsystem: Logger.nnwSubsystem, category: "TranslationService")
 
-	private static let maxCharactersPerBatch = 6000
-	private static let maxConcurrentRequests = 4
-
 	private let session: URLSession
 	private let cacheFolder: URL?
 	private var memoryCache = [String: String]()
+
+	/// Models that answered 400 when asked not to reason — their reasoning can't be turned off.
+	private var modelsRequiringReasoning = Set<String>()
 
 	init() {
 		let configuration = URLSessionConfiguration.ephemeral
@@ -67,12 +69,12 @@ actor TranslationService {
 		}
 	}
 
-	/// Yields results as they arrive: cached paragraphs first, then one result per batch.
-	/// Smaller batches come back sooner; larger ones use fewer requests.
-	nonisolated func translate(_ items: [TranslationItem], configuration: TranslationConfiguration, maxItemsPerBatch: Int = 20) -> AsyncStream<TranslationBatchResult> {
+	/// Yields partial translations while the reply streams in, then exactly one `.translated` or `.failed`.
+	/// A cached translation comes back right away as `.translated`.
+	nonisolated func translate(_ text: String, configuration: TranslationConfiguration) -> AsyncStream<TranslationEvent> {
 		AsyncStream { continuation in
 			let task = Task {
-				await self.run(items, configuration: configuration, maxItemsPerBatch: maxItemsPerBatch, continuation: continuation)
+				await self.run(text, configuration: configuration, continuation: continuation)
 				continuation.finish()
 			}
 			continuation.onTermination = { _ in
@@ -83,160 +85,91 @@ actor TranslationService {
 
 	/// Translates one string, bypassing the cache. Used to check the settings.
 	func testTranslation(_ text: String, configuration: TranslationConfiguration) async throws -> String {
-		let results = try await requestTranslations([text], configuration: configuration)
-		return results.first ?? ""
+		try await requestTranslation(text, configuration: configuration) { _ in }
 	}
 }
 
 private extension TranslationService {
 
-	func run(_ items: [TranslationItem], configuration: TranslationConfiguration, maxItemsPerBatch: Int, continuation: AsyncStream<TranslationBatchResult>.Continuation) async {
-		var cached = [(id: String, text: String)]()
-		var uncached = [TranslationItem]()
-
-		for item in items {
-			if let translation = cachedTranslation(item.text, configuration: configuration) {
-				cached.append((item.id, translation))
-			} else {
-				uncached.append(item)
-			}
-		}
-
-		if !cached.isEmpty {
-			continuation.yield(.translated(cached))
-		}
-
-		let batches = Self.makeBatches(uncached, maxItemsPerBatch: maxItemsPerBatch)
-		guard !batches.isEmpty else {
+	func run(_ text: String, configuration: TranslationConfiguration, continuation: AsyncStream<TranslationEvent>.Continuation) async {
+		if let translation = cachedTranslation(text, configuration: configuration) {
+			continuation.yield(.translated(translation))
 			return
 		}
 
-		await withTaskGroup(of: TranslationBatchResult.self) { group in
-			var nextBatchIndex = 0
-
-			func addNextBatch() {
-				guard nextBatchIndex < batches.count else {
-					return
-				}
-				let batch = batches[nextBatchIndex]
-				nextBatchIndex += 1
-				group.addTask {
-					await self.translateBatch(batch, configuration: configuration)
-				}
-			}
-
-			for _ in 0..<Self.maxConcurrentRequests {
-				addNextBatch()
-			}
-			for await result in group {
-				continuation.yield(result)
-				if Task.isCancelled {
-					group.cancelAll()
-					return
-				}
-				addNextBatch()
-			}
-		}
-	}
-
-	func translateBatch(_ batch: [TranslationItem], configuration: TranslationConfiguration) async -> TranslationBatchResult {
 		do {
-			let translations = try await translateSplittingOnMismatch(batch.map(\.text), configuration: configuration)
-			var results = [(id: String, text: String)]()
-			for (item, translation) in zip(batch, translations) {
-				storeCachedTranslation(translation, for: item.text, configuration: configuration)
-				results.append((item.id, translation))
+			let translation = try await requestTranslation(text, configuration: configuration) { partial in
+				continuation.yield(.partial(partial))
 			}
-			return .translated(results)
+			storeCachedTranslation(translation, for: text, configuration: configuration)
+			continuation.yield(.translated(translation))
+		} catch is CancellationError {
+			return
 		} catch {
-			Self.logger.error("TranslationService: batch failed: \(error.localizedDescription)")
-			return .failed(ids: batch.map(\.id), message: error.localizedDescription)
-		}
-	}
-
-	/// Models sometimes merge or drop entries in a long batch. When the counts don't match, retry each half.
-	func translateSplittingOnMismatch(_ texts: [String], configuration: TranslationConfiguration) async throws -> [String] {
-		do {
-			return try await requestTranslations(texts, configuration: configuration)
-		} catch TranslationError.unexpectedResponse(let detail) where texts.count > 1 {
-			Self.logger.info("TranslationService: splitting batch of \(texts.count) after unexpected response: \(detail)")
-			let middle = texts.count / 2
-			let first = try await translateSplittingOnMismatch(Array(texts[..<middle]), configuration: configuration)
-			let second = try await translateSplittingOnMismatch(Array(texts[middle...]), configuration: configuration)
-			return first + second
-		}
-	}
-
-	func requestTranslations(_ texts: [String], configuration: TranslationConfiguration) async throws -> [String] {
-		let url = try Self.completionsURL(configuration.baseURL)
-
-		// A single paragraph goes as plain text: fewer tokens for the model to read and write, so it comes back sooner.
-		let isSingleText = texts.count == 1
-		let systemPrompt: String
-		let userContent: String
-		if isSingleText, let text = texts.first {
-			systemPrompt = """
-			You are a professional translator. The user sends one paragraph from a news article or blog post. \
-			Translate it into \(configuration.targetLanguage). \
-			Reply with only the translation. \
-			Keep names, code, URLs, and numbers intact. If it's already in \(configuration.targetLanguage), return it unchanged. \
-			No explanations, no quotes, no Markdown.
-			"""
-			userContent = text
-		} else {
-			systemPrompt = """
-			You are a professional translator. The user sends a JSON array of strings taken from a news article or blog post. \
-			Translate each string into \(configuration.targetLanguage). \
-			Reply with only a JSON array of strings: exactly \(texts.count) elements, in the same order, one translation per input string. \
-			Keep names, code, URLs, and numbers intact. If a string is already in \(configuration.targetLanguage), return it unchanged. \
-			No explanations, no Markdown.
-			"""
-			userContent = String(decoding: try JSONEncoder().encode(texts), as: UTF8.self)
-		}
-
-		let body: [String: Any] = [
-			"model": configuration.model,
-			"stream": false,
-			"messages": [
-				["role": "system", "content": systemPrompt],
-				["role": "user", "content": userContent]
-			]
-		]
-
-		var request = URLRequest(url: url)
-		request.httpMethod = "POST"
-		request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-		if !configuration.apiKey.isEmpty {
-			request.setValue("Bearer \(configuration.apiKey)", forHTTPHeaderField: "Authorization")
-		}
-		request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-		let (data, response) = try await session.data(for: request)
-
-		if let httpResponse = response as? HTTPURLResponse, !(200..<300).contains(httpResponse.statusCode) {
-			throw TranslationError.httpError(status: httpResponse.statusCode, message: Self.errorMessage(from: data))
-		}
-
-		guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-			  let choices = json["choices"] as? [[String: Any]],
-			  let message = choices.first?["message"] as? [String: Any],
-			  let content = message["content"] as? String else {
-			throw TranslationError.unexpectedResponse(String(decoding: data.prefix(200), as: UTF8.self))
-		}
-
-		if isSingleText {
-			let translation = Self.parseSingleTranslation(content)
-			guard !translation.isEmpty else {
-				throw TranslationError.unexpectedResponse("empty translation")
+			if Task.isCancelled {
+				return
 			}
-			return [translation]
+			Self.logger.error("TranslationService: request failed: \(error.localizedDescription)")
+			continuation.yield(.failed(error.localizedDescription))
 		}
+	}
 
-		let translations = try Self.parseTranslations(content)
-		guard translations.count == texts.count else {
-			throw TranslationError.unexpectedResponse("expected \(texts.count) translations, got \(translations.count)")
+	func requestTranslation(_ text: String, configuration: TranslationConfiguration, onPartial: @Sendable (String) -> Void) async throws -> String {
+		var disablesReasoning = Self.canDisableReasoning(configuration) && !modelsRequiringReasoning.contains(configuration.model)
+
+		while true {
+			let request = try Self.makeRequest(text, configuration: configuration, disablesReasoning: disablesReasoning)
+			let (bytes, response) = try await session.bytes(for: request)
+			let httpResponse = response as? HTTPURLResponse
+
+			if let httpResponse, !(200..<300).contains(httpResponse.statusCode) {
+				let data = try await Self.collect(bytes, limit: 4096)
+				if disablesReasoning && httpResponse.statusCode == 400 {
+					Self.logger.info("TranslationService: \(configuration.model) can't turn off reasoning; retrying with it on")
+					modelsRequiringReasoning.insert(configuration.model)
+					disablesReasoning = false
+					continue
+				}
+				throw TranslationError.httpError(status: httpResponse.statusCode, message: Self.errorMessage(from: data))
+			}
+
+			// A server that ignores "stream" answers with a single JSON body.
+			let contentType = httpResponse?.value(forHTTPHeaderField: "Content-Type") ?? ""
+			guard contentType.contains("text/event-stream") else {
+				let data = try await Self.collect(bytes, limit: nil)
+				return try Self.checkedTranslation(Self.messageContent(from: data))
+			}
+
+			var reply = ""
+			for try await line in bytes.lines {
+				try Task.checkCancellation()
+				guard line.hasPrefix("data:") else {
+					continue
+				}
+				let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+				if payload == "[DONE]" {
+					break
+				}
+				guard let json = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] else {
+					continue
+				}
+				if let error = json["error"] {
+					throw TranslationError.unexpectedResponse(Self.errorMessage(fromErrorValue: error))
+				}
+				guard let choices = json["choices"] as? [[String: Any]],
+					  let delta = choices.first?["delta"] as? [String: Any],
+					  let piece = delta["content"] as? String,
+					  !piece.isEmpty else {
+					continue
+				}
+				reply += piece
+				let visible = Self.visibleText(ofPartialReply: reply)
+				if !visible.isEmpty {
+					onPartial(visible)
+				}
+			}
+			return try Self.checkedTranslation(reply)
 		}
-		return translations
 	}
 
 	// MARK: Cache
@@ -268,26 +201,44 @@ private extension TranslationService {
 		try? Data(translation.utf8).write(to: cacheFolder.appendingPathComponent(key), options: .atomic)
 	}
 
-	// MARK: Helpers
+	// MARK: Request
 
-	static func makeBatches(_ items: [TranslationItem], maxItemsPerBatch: Int) -> [[TranslationItem]] {
-		var batches = [[TranslationItem]]()
-		var current = [TranslationItem]()
-		var characterCount = 0
+	static func makeRequest(_ text: String, configuration: TranslationConfiguration, disablesReasoning: Bool) throws -> URLRequest {
+		let systemPrompt = """
+		You are a professional translator. The user sends one paragraph from a news article or blog post. \
+		Translate it into \(configuration.targetLanguage). \
+		Reply with only the translation. \
+		Keep names, code, URLs, and numbers intact. If it's already in \(configuration.targetLanguage), return it unchanged. \
+		No explanations, no quotes, no Markdown.
+		"""
 
-		for item in items {
-			if !current.isEmpty && (current.count >= maxItemsPerBatch || characterCount + item.text.count > maxCharactersPerBatch) {
-				batches.append(current)
-				current = []
-				characterCount = 0
-			}
-			current.append(item)
-			characterCount += item.text.count
+		var body: [String: Any] = [
+			"model": configuration.model,
+			"stream": true,
+			"messages": [
+				["role": "system", "content": systemPrompt],
+				["role": "user", "content": text]
+			]
+		]
+		// Translation doesn't need the model to think first, and thinking delays the first word by seconds.
+		if disablesReasoning {
+			body["reasoning"] = ["effort": "none"]
 		}
-		if !current.isEmpty {
-			batches.append(current)
+
+		var request = URLRequest(url: try completionsURL(configuration.baseURL))
+		request.httpMethod = "POST"
+		request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+		request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+		if !configuration.apiKey.isEmpty {
+			request.setValue("Bearer \(configuration.apiKey)", forHTTPHeaderField: "Authorization")
 		}
-		return batches
+		request.httpBody = try JSONSerialization.data(withJSONObject: body)
+		return request
+	}
+
+	/// Only OpenRouter gets the reasoning parameter; other servers may reject parameters they don't know.
+	static func canDisableReasoning(_ configuration: TranslationConfiguration) -> Bool {
+		URL(string: configuration.baseURL)?.host?.hasSuffix("openrouter.ai") ?? false
 	}
 
 	static func completionsURL(_ baseURL: String) throws -> URL {
@@ -304,47 +255,79 @@ private extension TranslationService {
 		return url
 	}
 
+	// MARK: Response
+
+	static func collect(_ bytes: URLSession.AsyncBytes, limit: Int?) async throws -> Data {
+		var data = Data()
+		for try await byte in bytes {
+			data.append(byte)
+			if let limit, data.count >= limit {
+				break
+			}
+		}
+		return data
+	}
+
+	static func messageContent(from data: Data) throws -> String {
+		guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+			  let choices = json["choices"] as? [[String: Any]],
+			  let message = choices.first?["message"] as? [String: Any],
+			  let content = message["content"] as? String else {
+			throw TranslationError.unexpectedResponse(String(decoding: data.prefix(200), as: UTF8.self))
+		}
+		return content
+	}
+
+	static func checkedTranslation(_ reply: String) throws -> String {
+		let translation = cleanedTranslation(reply)
+		guard !translation.isEmpty else {
+			throw TranslationError.unexpectedResponse(NSLocalizedString("empty translation", comment: "Translation error"))
+		}
+		return translation
+	}
+
+	/// What to show while a reply is still streaming: nothing during a <think> block.
+	static func visibleText(ofPartialReply reply: String) -> String {
+		let trimmed = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+		if trimmed.hasPrefix("<think>") && !trimmed.contains("</think>") {
+			return ""
+		}
+		return cleanedTranslation(reply)
+	}
+
 	/// Strips reasoning blocks and code fences some models wrap around a plain-text reply.
-	static func parseSingleTranslation(_ content: String) -> String {
-		var text = content
+	static func cleanedTranslation(_ reply: String) -> String {
+		var text = reply
 		if let thinkEnd = text.range(of: "</think>") {
 			text = String(text[thinkEnd.upperBound...])
 		}
 		text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-		if text.hasPrefix("```") && text.hasSuffix("```") && text.count >= 6 {
-			text = String(text.dropFirst(3).dropLast(3))
+		if text.hasPrefix("```") {
+			text = String(text.dropFirst(3))
 			if let firstNewline = text.firstIndex(of: "\n"), !text[..<firstNewline].contains(" ") {
 				text = String(text[text.index(after: firstNewline)...])
+			}
+			if text.hasSuffix("```") {
+				text = String(text.dropLast(3))
 			}
 		}
 		return text.trimmingCharacters(in: .whitespacesAndNewlines)
 	}
 
-	/// Pulls the JSON array out of the reply, tolerating code fences, reasoning blocks, and surrounding text.
-	static func parseTranslations(_ content: String) throws -> [String] {
-		var text = content
-		if let thinkEnd = text.range(of: "</think>") {
-			text = String(text[thinkEnd.upperBound...])
-		}
-		guard let start = text.firstIndex(of: "["), let end = text.lastIndex(of: "]"), start < end else {
-			throw TranslationError.unexpectedResponse(String(content.prefix(200)))
-		}
-		let arrayText = text[start...end]
-		guard let translations = try? JSONDecoder().decode([String].self, from: Data(arrayText.utf8)) else {
-			throw TranslationError.unexpectedResponse(String(content.prefix(200)))
-		}
-		return translations.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-	}
-
 	static func errorMessage(from data: Data) -> String {
-		if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-			if let error = json["error"] as? [String: Any], let message = error["message"] as? String {
-				return message
-			}
-			if let message = json["error"] as? String {
-				return message
-			}
+		if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let error = json["error"] {
+			return errorMessage(fromErrorValue: error)
 		}
 		return String(decoding: data.prefix(200), as: UTF8.self)
+	}
+
+	static func errorMessage(fromErrorValue error: Any) -> String {
+		if let error = error as? [String: Any], let message = error["message"] as? String {
+			return message
+		}
+		if let message = error as? String {
+			return message
+		}
+		return String(describing: error)
 	}
 }
