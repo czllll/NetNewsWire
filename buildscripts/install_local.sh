@@ -25,9 +25,9 @@ xcodebuild -project "${PROJECT_ROOT}/NetNewsWire.xcodeproj" -scheme NetNewsWire 
 	-destination "platform=macOS,arch=$(uname -m)" -derivedDataPath "${BUILD_DIR}" \
 	CODE_SIGNING_ALLOWED=NO build > "${BUILD_DIR}.log" 2>&1 || true
 APP="${BUILD_DIR}/Build/Products/Release/NetNewsWire.app"
-OTHER_FAILURES="$(sed -n '/The following build commands failed:/,/failure/p' "${BUILD_DIR}.log" | grep -vE "build commands failed|Delete Unnecessary Frameworks|Building project|failure" || true)"
+OTHER_FAILURES="$(sed -n '/The following build commands failed:/,/failure/p' "${BUILD_DIR}.log" | grep -vE 'build commands failed|Delete.{0,2}Unnecessary.{0,2}Frameworks|Building project|failure' || true)"
 if [ -n "${OTHER_FAILURES}" ] || [ ! -d "${APP}" ]; then
-	grep -E "error:" "${BUILD_DIR}.log" | sort -u | head -20
+	grep -E "error:" "${BUILD_DIR}.log" | sort -u | head -20 || true
 	echo "Build failed. Log: ${BUILD_DIR}.log"
 	exit 1
 fi
