@@ -20,8 +20,8 @@ var nnwTranslation = (function() {
 	const minimumTextLength = 2;
 	const maximumTextLength = 5000;
 
-	// Start translating a little before a paragraph scrolls into view.
-	const lookaheadMargin = "0px 0px 50% 0px";
+	// Start translating a little before a paragraph scrolls into view, and keep it until it is well out of view.
+	const lookaheadMargin = "25% 0px 50% 0px";
 	// Paragraphs that become visible together are sent together.
 	const flushDelay = 80;
 
@@ -63,7 +63,11 @@ var nnwTranslation = (function() {
 
 	let generation = 0;
 	let observer = null;
-	let queue = [];
+	// Paragraphs that came into view, and ones that left it before being translated, since the last flush.
+	let queue = new Map();
+	let hidden = new Set();
+	// Per paragraph id: "queued" once sent for translation, "done" once its final translation (or error) is in.
+	const states = new Map();
 	let flushTimer = null;
 	const texts = new Map();
 
@@ -205,23 +209,55 @@ var nnwTranslation = (function() {
 
 	function flush() {
 		flushTimer = null;
-		if (queue.length === 0) {
+		if (queue.size === 0 && hidden.size === 0) {
 			return;
 		}
-		const items = queue;
-		queue = [];
-		window.webkit.messageHandlers.nnwTranslate.postMessage({ generation: generation, items: items });
+		const items = Array.from(queue.values());
+		const hiddenIDs = Array.from(hidden);
+		queue = new Map();
+		hidden = new Set();
+		window.webkit.messageHandlers.nnwTranslate.postMessage({ generation: generation, items: items, hidden: hiddenIDs });
+	}
+
+	function scheduleFlush() {
+		if (flushTimer === null) {
+			flushTimer = setTimeout(flush, flushDelay);
+		}
 	}
 
 	function paragraphDidBecomeVisible(element) {
 		const id = element.getAttribute(idAttribute);
+		if (states.has(id)) {
+			return;
+		}
+		states.set(id, "queued");
+
 		const translation = document.createElement("span");
 		translation.className = `${translationClass} ${pendingClass}`;
 		element.appendChild(translation);
 
-		queue.push({ id: id, text: texts.get(id) });
-		if (flushTimer === null) {
-			flushTimer = setTimeout(flush, flushDelay);
+		queue.set(id, { id: id, text: texts.get(id) });
+		scheduleFlush();
+	}
+
+	// Scrolled away before its translation finished: drop it, so what's on screen goes first.
+	// It's requested again if it comes back into view.
+	function paragraphDidBecomeHidden(element) {
+		const id = element.getAttribute(idAttribute);
+		if (states.get(id) !== "queued") {
+			return;
+		}
+		states.delete(id);
+		const translation = element.querySelector(`:scope > .${translationClass}`);
+		if (translation) {
+			translation.remove();
+		}
+
+		if (queue.has(id)) {
+			queue.delete(id);
+		} else {
+			hidden.add(id);
+			scheduleFlush();
 		}
 	}
 
@@ -236,8 +272,9 @@ var nnwTranslation = (function() {
 		observer = new IntersectionObserver(entries => {
 			for (const entry of entries) {
 				if (entry.isIntersecting) {
-					observer.unobserve(entry.target);
 					paragraphDidBecomeVisible(entry.target);
+				} else {
+					paragraphDidBecomeHidden(entry.target);
 				}
 			}
 		}, { rootMargin: lookaheadMargin });
@@ -264,8 +301,16 @@ var nnwTranslation = (function() {
 		}
 	}
 
-	// results: [{id, text}]
-	function apply(resultGeneration, results) {
+	function markDone(id) {
+		states.set(id, "done");
+		const element = document.querySelector(`[${idAttribute}="${id}"]`);
+		if (element && observer !== null) {
+			observer.unobserve(element);
+		}
+	}
+
+	// results: [{id, text}]. isFinal is false while the reply is still streaming in.
+	function apply(resultGeneration, results, isFinal) {
 		if (resultGeneration !== generation) {
 			return;
 		}
@@ -276,6 +321,9 @@ var nnwTranslation = (function() {
 			}
 			translation.classList.remove(pendingClass, errorClass);
 			translation.textContent = result.text;
+			if (isFinal) {
+				markDone(result.id);
+			}
 		}
 	}
 
@@ -288,6 +336,7 @@ var nnwTranslation = (function() {
 			if (!translation) {
 				continue;
 			}
+			markDone(id);
 			translation.classList.remove(pendingClass);
 			translation.classList.add(errorClass);
 			translation.textContent = message;
@@ -304,7 +353,9 @@ var nnwTranslation = (function() {
 			clearTimeout(flushTimer);
 			flushTimer = null;
 		}
-		queue = [];
+		queue = new Map();
+		hidden = new Set();
+		states.clear();
 		texts.clear();
 		document.querySelectorAll(`.${translationClass}`).forEach(element => element.remove());
 		document.querySelectorAll(`[${idAttribute}]`).forEach(element => element.removeAttribute(idAttribute));
