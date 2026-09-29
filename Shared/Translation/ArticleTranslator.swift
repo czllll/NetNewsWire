@@ -11,7 +11,7 @@ import os
 import RSCore
 
 /// Drives translation.js in an article web view. The page reports paragraphs as they
-/// scroll into view; they're translated in small batches, a few requests at a time,
+/// scroll into view; each is translated in its own request, a few at a time,
 /// and results are shown strictly top to bottom — a later batch that finishes first
 /// waits for the ones above it.
 @MainActor final class ArticleTranslator {
@@ -20,8 +20,8 @@ import RSCore
 	static let messageName = "nnwTranslate"
 
 	private static let logger = Logger(subsystem: Logger.nnwSubsystem, category: "ArticleTranslator")
-	private static let maxItemsPerBatch = 3
-	private static let maxConcurrentBatches = 3
+	private static let maxItemsPerBatch = 1
+	private static let maxConcurrentBatches = 5
 
 	/// Bumped on every start and cancel, so results for a previous page are dropped.
 	private var generation = 0

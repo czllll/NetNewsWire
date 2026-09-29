@@ -170,14 +170,29 @@ private extension TranslationService {
 	func requestTranslations(_ texts: [String], configuration: TranslationConfiguration) async throws -> [String] {
 		let url = try Self.completionsURL(configuration.baseURL)
 
-		let systemPrompt = """
-		You are a professional translator. The user sends a JSON array of strings taken from a news article or blog post. \
-		Translate each string into \(configuration.targetLanguage). \
-		Reply with only a JSON array of strings: exactly \(texts.count) elements, in the same order, one translation per input string. \
-		Keep names, code, URLs, and numbers intact. If a string is already in \(configuration.targetLanguage), return it unchanged. \
-		No explanations, no Markdown.
-		"""
-		let userContent = String(decoding: try JSONEncoder().encode(texts), as: UTF8.self)
+		// A single paragraph goes as plain text: fewer tokens for the model to read and write, so it comes back sooner.
+		let isSingleText = texts.count == 1
+		let systemPrompt: String
+		let userContent: String
+		if isSingleText, let text = texts.first {
+			systemPrompt = """
+			You are a professional translator. The user sends one paragraph from a news article or blog post. \
+			Translate it into \(configuration.targetLanguage). \
+			Reply with only the translation. \
+			Keep names, code, URLs, and numbers intact. If it's already in \(configuration.targetLanguage), return it unchanged. \
+			No explanations, no quotes, no Markdown.
+			"""
+			userContent = text
+		} else {
+			systemPrompt = """
+			You are a professional translator. The user sends a JSON array of strings taken from a news article or blog post. \
+			Translate each string into \(configuration.targetLanguage). \
+			Reply with only a JSON array of strings: exactly \(texts.count) elements, in the same order, one translation per input string. \
+			Keep names, code, URLs, and numbers intact. If a string is already in \(configuration.targetLanguage), return it unchanged. \
+			No explanations, no Markdown.
+			"""
+			userContent = String(decoding: try JSONEncoder().encode(texts), as: UTF8.self)
+		}
 
 		let body: [String: Any] = [
 			"model": configuration.model,
@@ -207,6 +222,14 @@ private extension TranslationService {
 			  let message = choices.first?["message"] as? [String: Any],
 			  let content = message["content"] as? String else {
 			throw TranslationError.unexpectedResponse(String(decoding: data.prefix(200), as: UTF8.self))
+		}
+
+		if isSingleText {
+			let translation = Self.parseSingleTranslation(content)
+			guard !translation.isEmpty else {
+				throw TranslationError.unexpectedResponse("empty translation")
+			}
+			return [translation]
 		}
 
 		let translations = try Self.parseTranslations(content)
@@ -279,6 +302,22 @@ private extension TranslationService {
 			throw TranslationError.invalidURL(baseURL)
 		}
 		return url
+	}
+
+	/// Strips reasoning blocks and code fences some models wrap around a plain-text reply.
+	static func parseSingleTranslation(_ content: String) -> String {
+		var text = content
+		if let thinkEnd = text.range(of: "</think>") {
+			text = String(text[thinkEnd.upperBound...])
+		}
+		text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+		if text.hasPrefix("```") && text.hasSuffix("```") && text.count >= 6 {
+			text = String(text.dropFirst(3).dropLast(3))
+			if let firstNewline = text.firstIndex(of: "\n"), !text[..<firstNewline].contains(" ") {
+				text = String(text[text.index(after: firstNewline)...])
+			}
+		}
+		return text.trimmingCharacters(in: .whitespacesAndNewlines)
 	}
 
 	/// Pulls the JSON array out of the reply, tolerating code fences, reasoning blocks, and surrounding text.
